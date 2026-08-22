@@ -6,7 +6,10 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-import tomllib
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10 and older in the macOS system runtime.
+    import tomli as tomllib
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Iterable
@@ -17,7 +20,7 @@ USER_ACTIVITY = frozenset({"keypad", "add_account", "scan_qr", "copy_code", "nav
 NON_ACTIVITY = frozenset({"timer_tick", "extend_request", "lock_now"})
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class State:
     now: int = 0
     locked: bool = True

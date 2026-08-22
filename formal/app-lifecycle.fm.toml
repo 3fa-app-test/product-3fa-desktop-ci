@@ -1,0 +1,28 @@
+schema_version = 1
+id = "threefa-desktop-vault-lifecycle"
+repository = "3FA-app/3FA-desktop.rs"
+model = "formal/app_lifecycle_model.py"
+runner = "python3"
+command = ["python3", "formal/app_lifecycle_model.py"]
+claim = "bounded-exhaustive-total-lifecycle-state-machine"
+timeout_seconds = 30
+
+[[invariants]]
+id = "operation-phase-correspondence"
+description = "An active create or unlock token exists exactly in its operation phase; exhausted counters reject new operations."
+
+[[invariants]]
+id = "lock-invalidates-operations"
+description = "Lock advances the generation and removes all active operations."
+
+[[invariants]]
+id = "stale-completion-cannot-unlock"
+description = "A completion without the exact active token is rejected without changing state."
+
+[[invariants]]
+id = "dispose-is-absorbing"
+description = "No lifecycle event can leave the disposed state."
+
+[refinement]
+production_paths = ["src/app_state.rs", "src/ui.rs"]
+notes = "Rust unit tests and AppState debug invariants connect the model to production decrypted-material ownership."

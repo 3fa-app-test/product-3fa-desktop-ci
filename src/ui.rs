@@ -15,6 +15,7 @@ use zeroize::{Zeroize, Zeroizing};
 /// it (if it hasn't already been replaced by something the user copied).
 const CLIPBOARD_CLEAR_AFTER: Duration = Duration::from_secs(20);
 
+use threefa_core::app_state::{Phase as VaultPhase, VaultLifecycle};
 use threefa_core::auth::{FactorProof, PolicyEngine};
 use threefa_core::config::{config_path, SyncConfig};
 use threefa_core::crypto::SecretKey;
@@ -37,11 +38,10 @@ struct AppState {
     file: Option<VaultFile>,
     data: Option<VaultData>,
     dek: Option<SecretKey>,
+    lifecycle: VaultLifecycle,
     session: Session,
     /// In-progress passcode entry.
     entry: String,
-    /// True when no vault exists yet and we are choosing a new passcode.
-    setup: bool,
     /// Non-secret sync config (server URL, username, stable device id).
     sync_cfg: SyncConfig,
     /// Path to `config.json` beside the vault.
@@ -50,12 +50,32 @@ struct AppState {
 
 impl AppState {
     fn lock(&mut self) {
+        self.lifecycle.lock();
         // Drop decrypted material; SecretKey/VaultData zeroize on drop.
         self.data = None;
         self.dek = None;
         // Wipe the passcode buffer's bytes, not just reset its length.
         self.entry.zeroize();
         self.session.lock();
+        self.assert_lifecycle_invariant();
+    }
+
+    fn dispose(&mut self) {
+        self.lifecycle.dispose();
+        self.data = None;
+        self.dek = None;
+        self.entry.zeroize();
+        self.session.lock();
+        self.assert_lifecycle_invariant();
+    }
+
+    fn assert_lifecycle_invariant(&self) {
+        let has_material = self.data.is_some() && self.dek.is_some();
+        debug_assert_eq!(
+            self.lifecycle.phase() == VaultPhase::Unlocked,
+            has_material,
+            "decrypted vault material must exist iff lifecycle is unlocked"
+        );
     }
 
     fn policy_engine(&self) -> PolicyEngine {
@@ -105,7 +125,9 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let file = std::fs::read(&vault_path)
         .ok()
         .and_then(|bytes| serde_json::from_slice::<VaultFile>(&bytes).ok());
-    let setup = file.is_none();
+    let mut lifecycle = VaultLifecycle::new();
+    assert!(lifecycle.initialize(file.is_some()));
+    let setup = lifecycle.phase() == VaultPhase::Setup;
 
     let cfg_path = config_path();
     let mut sync_cfg = SyncConfig::load(&cfg_path);
@@ -122,11 +144,11 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         file,
         data: None,
         dek: None,
+        lifecycle,
         session: Session::new(),
         // Pre-size to the passcode length so pushing digits never reallocates
         // (a realloc would copy the secret into a freed heap block we can't wipe).
         entry: String::with_capacity(8),
-        setup,
         sync_cfg,
         config_path: cfg_path,
     }));
@@ -151,6 +173,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     spawn_tick(&app, &state);
 
     app.run()?;
+    state.borrow_mut().dispose();
     Ok(())
 }
 
@@ -800,42 +823,67 @@ fn handle_passcode_submit(app: &AppWindow, state: &Rc<RefCell<AppState>>) {
     let entry = Zeroizing::new(std::mem::take(&mut s.entry));
     app.set_entered_length(0);
 
-    if s.setup {
+    if s.lifecycle.phase() == VaultPhase::Setup {
+        let Some(operation) = s.lifecycle.begin_create() else {
+            app.set_status("Vault creation is not available in the current state".into());
+            return;
+        };
         // Create a fresh vault sealed under this passcode.
         let data = VaultData::default();
         match VaultFile::create(entry.as_bytes(), &data) {
             Ok((file, dek)) => {
                 persist(&s.vault_path, &file);
+                if !s.lifecycle.complete(operation, true) {
+                    app.set_status("Vault creation was cancelled by a lock".into());
+                    return;
+                }
                 s.file = Some(file);
                 s.data = Some(data);
                 s.dek = Some(dek);
-                s.setup = false;
                 s.session.unlock(Instant::now());
+                s.assert_lifecycle_invariant();
                 drop(s);
                 app.set_screen("vault".into());
                 app.set_status("Vault created".into());
                 refresh_vault(app, state);
             }
-            Err(e) => app.set_status(format!("Could not create vault: {e}").into()),
+            Err(e) => {
+                s.lifecycle.complete(operation, false);
+                s.assert_lifecycle_invariant();
+                app.set_status(format!("Could not create vault: {e}").into());
+            }
         }
         return;
     }
 
+    let Some(operation) = s.lifecycle.begin_unlock() else {
+        app.set_status("Vault unlock is not available in the current state".into());
+        return;
+    };
+
     let Some(file) = s.file.clone() else {
+        s.lifecycle.complete(operation, false);
         app.set_status("No vault found".into());
         return;
     };
     match file.unlock(entry.as_bytes()) {
         Ok((data, dek)) => {
+            if !s.lifecycle.complete(operation, true) {
+                app.set_status("Vault unlock was cancelled by a lock".into());
+                return;
+            }
             s.data = Some(data);
             s.dek = Some(dek);
             s.session.unlock(Instant::now());
+            s.assert_lifecycle_invariant();
             drop(s);
             app.set_screen("vault".into());
             app.set_status("".into());
             refresh_vault(app, state);
         }
         Err(_) => {
+            s.lifecycle.complete(operation, false);
+            s.assert_lifecycle_invariant();
             app.set_status("Wrong passcode".into());
         }
     }

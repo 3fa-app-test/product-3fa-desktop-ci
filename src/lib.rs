@@ -5,6 +5,7 @@
 //! The GUI binary (`main.rs`) is a thin Slint shell over this library; keeping
 //! the logic here means it is all unit-testable without a display server.
 
+pub mod app_state;
 pub mod auth;
 pub mod config;
 pub mod crypto;

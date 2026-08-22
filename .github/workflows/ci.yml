@@ -24,8 +24,10 @@ jobs:
         run: |
           bad=$(git ls-files | grep -E '(^|/)(target/|\.direnv/|\.env$|result$)' || true)
           if [ -n "$bad" ]; then echo "forbidden tracked files:"; echo "$bad"; exit 1; fi
-      - name: Formal session manifest and boundary model
-        run: python3 formal/session_model.py
+      - name: Formal lifecycle and session models
+        run: |
+          python3 formal/session_model.py
+          python3 formal/app_lifecycle_model.py
       - name: Formal session JSON-lines deadline witness
         run: |
           printf '%s\n' \

@@ -32,6 +32,10 @@ verify:
 verify-release-policy name="prod":
     @python3 scripts/verify-sops-release-policy.py .sops.yaml {{ name }}
 
+formal:
+    python3 formal/session_model.py
+    python3 formal/app_lifecycle_model.py
+
 # Desktop client values are compiled with option_env!, so the launcher accepts
 # only the reviewed public allowlist before invoking Cargo.
 run name="dev":
