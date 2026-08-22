@@ -1,0 +1,17 @@
+[advisories]
+# These are reviewed unmaintained-crate notices, not vulnerability exceptions.
+# Keep them explicit so new RustSec findings still fail `cargo audit --deny
+# warnings`, and remove each entry as soon as its named upstream path migrates.
+ignore = [
+  # Lockfile-only optional metadata; `cargo tree --target all -i bincode@2.0.1`
+  # has no compiled path.
+  "RUSTSEC-2025-0141",
+  # Slint 1.17.1's build-time image pipeline reaches paste through ravif/rav1e
+  # and exr/pulp. It is unmaintained but has no reported vulnerability.
+  "RUSTSEC-2024-0436",
+  # Slint 1.17.1 pins resvg/usvg 0.47, whose font stack still uses these two
+  # unmaintained crates. resvg/usvg 0.48 migrates to harfrust and skrifa, but
+  # cannot be selected until Slint widens its ^0.47 constraint.
+  "RUSTSEC-2026-0206",
+  "RUSTSEC-2026-0192",
+]

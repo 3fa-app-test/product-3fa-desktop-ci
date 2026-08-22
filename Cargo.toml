@@ -61,8 +61,9 @@ hex = "0.4"
 url = "2"
 
 # QR decode (image import) — pure-Rust, no display server, so it builds headless
-# and runs in tests. Image codecs restricted to the two formats QR exports use.
-rqrr = "0.10"
+# and runs in tests. rqrr 0.10.1 still constrains the unsound lru 0.16 series;
+# pin its unreleased upstream lru 0.18 update until the next crate is published.
+rqrr = { git = "https://github.com/WanzenBug/rqrr", rev = "2a3d4d4fa93cc37f32c2d964462bf924761be4bb" }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 
 # GUI (optional so the core lib builds headless)
