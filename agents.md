@@ -52,6 +52,42 @@ This repository is the source of truth. The copy vendored into `ORESoftware/k8s-
 
 `vendor/threefa-interfaces` is an immutable generated snapshot of `3FA-app/3fa-interfaces`, pinned by exact commit and blob IDs in `VENDORED_INTERFACES.toml`. Do not hand-edit it independently. Update it only from the intended canonical interface commit, then run `python3 scripts/check_vendored_interfaces.py` and `cargo test --no-default-features --test interface_pin`.
 
+Deep-link route types, identifier validation, parser semantics, and golden fixtures belong in `3fa-interfaces`. Do not invent repository-local URL shapes that the Flutter companion cannot consume.
+
+## Desktop toolkit contract
+
+Read [`docs/DESKTOP_TOOLKIT.md`](docs/DESKTOP_TOOLKIT.md) before changing UI architecture, platform activation, packaging, or deep links.
+
+- The selected UI kit is **Slint**.
+- A WebView is prohibited. Do not add Tauri, Dioxus Desktop, Electron, an embedded browser, or HTML/JS UI rendering.
+- Security-sensitive state, route parsing, authorization, vault behavior, and platform credentials remain in Rust.
+- Slint markup owns presentation only and must never contain secrets, seeds, recovery material, tokens, or serialized vault data.
+- Changing toolkit requires an ADR and coordinated updates to the Flutter companion, `3FA-app/.github`, Linear, and the central strategy document.
+
+## Paired Flutter delivery
+
+The current Flutter companion is `ORESoftware/3fa-client-ui.dart`. The canonical organization-owned migration target is `3FA-app/3fa-flutter`, but it must not be treated as published until verified.
+
+For every desktop-facing feature:
+
+1. inspect both this Rust repository and the current Flutter companion;
+2. define shared acceptance criteria and identify affected interfaces, schemas, fixtures, assets, cryptographic formats, deep-link routes, and release behavior;
+3. normally update both implementations;
+4. when only one changes, record the no-change rationale, companion impact, parity gap, and follow-up work in the issue and pull request;
+5. test Rust and Flutter independently and report platform status separately; and
+6. keep reciprocal documentation and migration state accurate.
+
+## HTTPS-first deep links
+
+- Canonical form: `https://<verified-3fa-owned-host>/open/<route>?<bounded-query>`.
+- Fallback scheme: `threefa://`.
+- The production host must not be guessed; document it only after ownership/deployment are verified.
+- Treat every URL as untrusted input and validate host, route, version, identifiers, action, and bounded query parameters.
+- Never put passwords, bearer/refresh tokens, TOTP/HOTP seeds, recovery secrets, vault material, or encryption keys in URLs.
+- Use short-lived, single-use, audience-bound codes for authentication/device-transfer handoffs.
+- Support cold start, already-running/single-instance delivery, authentication resume, replay rejection, and browser fallback.
+- Require explicit confirmation for enrollment, recovery, device removal, imports, or other security-sensitive actions.
+
 ## Build context
 
 This is a standalone repository. CI builds and tests the core headlessly with `--no-default-features`. The default `gui` feature needs Slint's native dependencies; compile and test the full GUI locally on a supported host, but do not try to run the GUI in headless CI.
