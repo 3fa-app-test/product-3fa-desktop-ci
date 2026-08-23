@@ -43,7 +43,7 @@ jobs:
           args: ./.github/workflows/security.yml
       # Prebuilt binary served from the runner tool cache, so this costs seconds
       # rather than a from-source build of cargo-audit on every run.
-      - uses: taiki-e/install-action@b6b84cf49ebfe0176417bdce007c624f0db37f20 # v2
+      - uses: taiki-e/install-action@a2a5f6e99e1a31540baa0468acfa302cff0f359f # v2
         with:
           tool: cargo-audit@0.22.2
       # Cargo.lock is committed here (it is not gitignored), so the audit sees
