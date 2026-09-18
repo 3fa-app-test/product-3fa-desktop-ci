@@ -24,8 +24,8 @@ node_modules
 
 # Local build/run logs
 /.artifacts
-tmp
-temp
+tmp/
+temp/
 tmp/worktrees
 temp/worktrees
 
@@ -53,3 +53,9 @@ __pycache__/
 !/env/enc/dev.env.enc
 !/env/enc/prod.env.enc
 # END ores-sops dotenv policy
+
+# machine-local symlink to ORESoftware/my-ai AGENTS.md; never committed
+.ores/
+
+# build output (DEN-3945 conformance): never tracked
+target/
