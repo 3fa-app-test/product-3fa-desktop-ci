@@ -25,7 +25,7 @@ jobs:
       - name: Prove refreshed lockfile
         run: |
           set -euo pipefail
-          cargo check --locked
+          cargo check --locked --no-default-features
           cargo audit --deny warnings
       - name: Publish source-only lockfile update
         run: |
