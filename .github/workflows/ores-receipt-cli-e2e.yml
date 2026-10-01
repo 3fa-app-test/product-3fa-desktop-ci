@@ -1,0 +1,300 @@
+name: ORES receipt desktop CLI E2E
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/ores-receipt-cli-e2e.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  WASMX_DAEMON_SHA: d8999b344ff5fdb703fb037a4dffeeda60baed36
+  WASMX_CLI_SHA: 5179e4db75ec9d4eaebd867860b73296979b88ff
+  LL_DAEMON_SHA: 49a883262728cef5429c570832af9b506ae9279d
+  LL_CLI_SHA: 99773d6c378a0bf8a112c7c7b8f9520eb3c2b8b8
+
+jobs:
+  receipt-cli-e2e:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: Install pinned toolchains and WAT compiler
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.96.0 --profile minimal
+          rustup toolchain install 1.90.0 --profile minimal
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends wabt
+
+      - name: Clone and build exact daemon and CLI revisions
+        run: |
+          set -euo pipefail
+          git clone --quiet --filter=blob:none --no-tags https://github.com/wasm-xprs/wasmx-desktop-daemon.git wasmx-daemon
+          git -C wasmx-daemon checkout --detach "$WASMX_DAEMON_SHA"
+          test "$(git -C wasmx-daemon rev-parse HEAD)" = "$WASMX_DAEMON_SHA"
+          cargo +1.96.0 build --locked --manifest-path wasmx-daemon/Cargo.toml
+
+          git clone --quiet --filter=blob:none --no-tags https://github.com/wasm-xprs/wasmx-desktop-cli.git wasmx-cli
+          git -C wasmx-cli checkout --detach "$WASMX_CLI_SHA"
+          test "$(git -C wasmx-cli rev-parse HEAD)" = "$WASMX_CLI_SHA"
+          cargo +1.96.0 build --locked --manifest-path wasmx-cli/Cargo.toml
+
+          git clone --quiet --filter=blob:none --no-tags https://github.com/lunatic-lorry/ll-desktop-daemon.git ll-daemon
+          git -C ll-daemon checkout --detach "$LL_DAEMON_SHA"
+          test "$(git -C ll-daemon rev-parse HEAD)" = "$LL_DAEMON_SHA"
+          cargo +1.90.0 build --locked --manifest-path ll-daemon/Cargo.toml
+
+          git clone --quiet --filter=blob:none --no-tags https://github.com/lunatic-lorry/ll-desktop-cli.git ll-cli
+          git -C ll-cli checkout --detach "$LL_CLI_SHA"
+          test "$(git -C ll-cli rev-parse HEAD)" = "$LL_CLI_SHA"
+          cargo +1.90.0 build --locked --manifest-path ll-cli/Cargo.toml
+
+      - name: Generate exact adapter and receipt evidence
+        run: |
+          set -euo pipefail
+          mkdir -p fixtures
+          printf '%s\n' 'pub fn lambda_source_identity() {}' > fixtures/source.rs
+          cat > fixtures/wasmx.wat <<'WAT'
+          (module
+            (memory (export "memory") 1)
+            (func (export "wasmx_main") (result i32)
+              i32.const 0))
+          WAT
+          cat > fixtures/wasmx-tampered.wat <<'WAT'
+          (module
+            (memory (export "memory") 1)
+            (func (export "wasmx_main") (result i32)
+              nop
+              i32.const 0))
+          WAT
+          cat > fixtures/ll.wat <<'WAT'
+          (module (func (export "_start")))
+          WAT
+          cat > fixtures/ll-tampered.wat <<'WAT'
+          (module (func (export "_start") nop))
+          WAT
+          wat2wasm fixtures/wasmx.wat -o fixtures/wasmx.wasm
+          wat2wasm fixtures/wasmx-tampered.wat -o fixtures/wasmx-tampered.wasm
+          wat2wasm fixtures/ll.wat -o fixtures/ll.wasm
+          wat2wasm fixtures/ll-tampered.wat -o fixtures/ll-tampered.wasm
+
+          python3 - <<'PY'
+          import hashlib, json
+          from pathlib import Path
+
+          f = Path('fixtures')
+          source_sha = hashlib.sha256((f/'source.rs').read_bytes()).hexdigest()
+          zeroish = hashlib.sha256(b'ores-test-wrapper').hexdigest()
+          unit = hashlib.sha256(b'ores-test-unit-manifest').hexdigest()
+
+          profiles = {
+              'wasmx': {
+                  'provider': 'wasm_xprs',
+                  'runtime_repository': 'wasm-xprs/wasmx-lambdas',
+                  'runtime_contract': 'wasm-xprs.lambda-runtime/v1',
+                  'target_triple': 'wasm32-unknown-unknown',
+                  'execution_boundary': 'wasmtime_store_instance',
+                  'isolation_model': 'fresh_store_and_instance_per_invocation',
+                  'module_cache_policy': 'compiled_module_allowed',
+                  'ambient_import_policy': 'explicit_wasmx_v1_only',
+              },
+              'll': {
+                  'provider': 'lunatic_lorry',
+                  'runtime_repository': 'lunatic-lorry/ll-lambdas',
+                  'runtime_contract': 'lunatic-lorry.lambda-runtime/v1',
+                  'target_triple': 'wasm32-wasip1',
+                  'execution_boundary': 'lunatic_process',
+                  'isolation_model': 'fresh_wasm_actor_per_invocation',
+                  'module_cache_policy': 'module_bytes_or_compiled_module_allowed',
+                  'ambient_import_policy': 'explicit_lunatic_capabilities_only',
+              },
+          }
+
+          for name, p in profiles.items():
+              adapter = {
+                  'schema_version': 'ores.lambda.adapter/v1',
+                  'generated_by': 'ores-stack',
+                  'provider': p['provider'],
+                  'runtime_repository': p['runtime_repository'],
+                  'runtime_contract': p['runtime_contract'],
+                  'execution_boundary': p['execution_boundary'],
+                  'isolation_model': p['isolation_model'],
+                  'artifact_kind': 'wasm_module',
+                  'module_cache_policy': p['module_cache_policy'],
+                  'invocation_instance_reuse': 'forbidden',
+                  'ambient_import_policy': p['ambient_import_policy'],
+                  'durable_state': 'external_only',
+                  'source': 'fixtures/source.rs',
+                  'source_sha256': source_sha,
+              }
+              adapter_bytes = json.dumps(adapter, separators=(',', ':'), ensure_ascii=True).encode()
+              (f/f'{name}-adapter.json').write_bytes(adapter_bytes)
+              module = (f/f'{name}.wasm').read_bytes()
+              receipt = {
+                  'schema_version': 'ores.lambda.wasm-artifact.receipt/v1',
+                  'generated_by': 'ores-stack',
+                  'provider': p['provider'],
+                  'runtime_repository': p['runtime_repository'],
+                  'runtime_contract': p['runtime_contract'],
+                  'adapter_contract': 'ores.lambda.adapter/v1',
+                  'artifact_path': f'fixtures/{name}.wasm',
+                  'artifact_sha256': hashlib.sha256(module).hexdigest(),
+                  'deploy_mutation_performed': False,
+                  'target_triple': p['target_triple'],
+                  'adapter_path': f'fixtures/{name}-adapter.json',
+                  'adapter_sha256': hashlib.sha256(adapter_bytes).hexdigest(),
+                  'source_path': 'fixtures/source.rs',
+                  'source_sha256': source_sha,
+                  'cargo_manifest_path': 'Cargo.toml',
+                  'cargo_package': f'ores-test-{name}',
+                  'cargo_target_name': f'ores_test_{name}',
+                  'wrapper_sha256': zeroish,
+                  'unit_manifest_sha256': unit,
+              }
+              (f/f'{name}-receipt.json').write_text(json.dumps(receipt, separators=(',', ':')))
+              # Same semantic JSON object but different raw bytes. Receipt must reject it.
+              (f/f'{name}-adapter-reformatted.json').write_text(json.dumps(adapter, indent=2) + '\n')
+          PY
+
+      - name: Start both production daemons
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/wasmx-home" "$RUNNER_TEMP/ll-home"
+          HOME="$RUNNER_TEMP/wasmx-home" \
+          WASMX_DESKTOP_ADDR=127.0.0.1:8766 \
+          WASMX_DESKTOP_TOKEN_FILE="$RUNNER_TEMP/wasmx-token" \
+          WASMX_ARTIFACT_ROOT="$RUNNER_TEMP/wasmx-artifacts" \
+            ./wasmx-daemon/target/debug/wasmx-desktop-daemon >"$RUNNER_TEMP/wasmx-receipt.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/wasmx-receipt.pid"
+
+          (
+            cd ll-daemon
+            HOME="$RUNNER_TEMP/ll-home" \
+            LL_DESKTOP_ADDR=127.0.0.1:8763 \
+            LL_DESKTOP_TOKEN_FILE="$RUNNER_TEMP/ll-token" \
+              ./target/debug/ll-desktop-daemon
+          ) >"$RUNNER_TEMP/ll-receipt.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/ll-receipt.pid"
+
+          for _ in $(seq 1 60); do
+            if curl --fail --silent http://127.0.0.1:8766/healthz | grep -qx ok \
+              && curl --fail --silent http://127.0.0.1:8763/healthz | grep -qx ok; then exit 0; fi
+            sleep 1
+          done
+          cat "$RUNNER_TEMP/wasmx-receipt.log" || true
+          cat "$RUNNER_TEMP/ll-receipt.log" || true
+          exit 1
+
+      - name: Prove valid receipt evidence reaches both daemons through real CLIs
+        run: |
+          set -euo pipefail
+          WASMX_DESKTOP_FLAGS_CONFIG="$PWD/wasmx-cli/.cli-flags.toml" \
+          WASMX_DESKTOP_TOKEN_FILE="$RUNNER_TEMP/wasmx-token" \
+          WASMX_DESKTOP_DAEMON_URL=http://127.0.0.1:8766 \
+            ./wasmx-cli/target/debug/wasmx-desktop-cli deploy \
+              --tenant receipt-tenant --deployment receipt-ok \
+              --module fixtures/wasmx.wasm \
+              --ores-adapter fixtures/wasmx-adapter.json \
+              --ores-receipt fixtures/wasmx-receipt.json \
+              > "$RUNNER_TEMP/wasmx-valid-ack.json"
+
+          LL_DESKTOP_FLAGS_CONFIG="$PWD/ll-cli/.cli-flags.toml" \
+          LL_DESKTOP_TOKEN_FILE="$RUNNER_TEMP/ll-token" \
+          LL_DESKTOP_DAEMON_URL=http://127.0.0.1:8763 \
+            ./ll-cli/target/debug/ll-desktop-cli deploy \
+              --tenant receipt-tenant --deployment receipt-ok \
+              --module fixtures/ll.wasm \
+              --ores-adapter fixtures/ll-adapter.json \
+              --ores-receipt fixtures/ll-receipt.json \
+              > "$RUNNER_TEMP/ll-valid-ack.json"
+
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          root = Path(os.environ['RUNNER_TEMP'])
+          for runtime in ('wasmx', 'll'):
+              ack = json.loads((root/f'{runtime}-valid-ack.json').read_text())
+              assert ack['tenant_id'] == 'receipt-tenant'
+              assert ack['deployment_id'] == 'receipt-ok'
+              assert ack['ores_adapter_verified'] is True
+              assert ack['ores_receipt_verified'] is True
+          PY
+
+      - name: Reject byte-different adapters before daemon mutation
+        run: |
+          set -euo pipefail
+          if WASMX_DESKTOP_FLAGS_CONFIG="$PWD/wasmx-cli/.cli-flags.toml" \
+            WASMX_DESKTOP_TOKEN_FILE="$RUNNER_TEMP/wasmx-token" \
+            WASMX_DESKTOP_DAEMON_URL=http://127.0.0.1:8766 \
+            ./wasmx-cli/target/debug/wasmx-desktop-cli deploy \
+              --tenant receipt-tenant --deployment bad-adapter \
+              --module fixtures/wasmx.wasm \
+              --ores-adapter fixtures/wasmx-adapter-reformatted.json \
+              --ores-receipt fixtures/wasmx-receipt.json; then exit 1; fi
+
+          if LL_DESKTOP_FLAGS_CONFIG="$PWD/ll-cli/.cli-flags.toml" \
+            LL_DESKTOP_TOKEN_FILE="$RUNNER_TEMP/ll-token" \
+            LL_DESKTOP_DAEMON_URL=http://127.0.0.1:8763 \
+            ./ll-cli/target/debug/ll-desktop-cli deploy \
+              --tenant receipt-tenant --deployment bad-adapter \
+              --module fixtures/ll.wasm \
+              --ores-adapter fixtures/ll-adapter-reformatted.json \
+              --ores-receipt fixtures/ll-receipt.json; then exit 1; fi
+
+          WASMX_TOKEN="$(tr -d '\r\n' < "$RUNNER_TEMP/wasmx-token")"
+          LL_TOKEN="$(tr -d '\r\n' < "$RUNNER_TEMP/ll-token")"
+          test "$(curl --silent --output /dev/null --write-out '%{http_code}' -H "Authorization: Bearer $WASMX_TOKEN" http://127.0.0.1:8766/v1/deployments/receipt-tenant/bad-adapter)" = 404
+          test "$(curl --silent --output /dev/null --write-out '%{http_code}' -H "Authorization: Bearer $LL_TOKEN" http://127.0.0.1:8763/v1/deployments/receipt-tenant/bad-adapter)" = 404
+
+      - name: Reject module digest drift before daemon mutation
+        run: |
+          set -euo pipefail
+          if WASMX_DESKTOP_FLAGS_CONFIG="$PWD/wasmx-cli/.cli-flags.toml" \
+            WASMX_DESKTOP_TOKEN_FILE="$RUNNER_TEMP/wasmx-token" \
+            WASMX_DESKTOP_DAEMON_URL=http://127.0.0.1:8766 \
+            ./wasmx-cli/target/debug/wasmx-desktop-cli deploy \
+              --tenant receipt-tenant --deployment bad-module \
+              --module fixtures/wasmx-tampered.wasm \
+              --ores-adapter fixtures/wasmx-adapter.json \
+              --ores-receipt fixtures/wasmx-receipt.json; then exit 1; fi
+
+          if LL_DESKTOP_FLAGS_CONFIG="$PWD/ll-cli/.cli-flags.toml" \
+            LL_DESKTOP_TOKEN_FILE="$RUNNER_TEMP/ll-token" \
+            LL_DESKTOP_DAEMON_URL=http://127.0.0.1:8763 \
+            ./ll-cli/target/debug/ll-desktop-cli deploy \
+              --tenant receipt-tenant --deployment bad-module \
+              --module fixtures/ll-tampered.wasm \
+              --ores-adapter fixtures/ll-adapter.json \
+              --ores-receipt fixtures/ll-receipt.json; then exit 1; fi
+
+          WASMX_TOKEN="$(tr -d '\r\n' < "$RUNNER_TEMP/wasmx-token")"
+          LL_TOKEN="$(tr -d '\r\n' < "$RUNNER_TEMP/ll-token")"
+          test "$(curl --silent --output /dev/null --write-out '%{http_code}' -H "Authorization: Bearer $WASMX_TOKEN" http://127.0.0.1:8766/v1/deployments/receipt-tenant/bad-module)" = 404
+          test "$(curl --silent --output /dev/null --write-out '%{http_code}' -H "Authorization: Bearer $LL_TOKEN" http://127.0.0.1:8763/v1/deployments/receipt-tenant/bad-module)" = 404
+
+          curl --fail --silent http://127.0.0.1:8766/healthz | grep -qx ok
+          curl --fail --silent http://127.0.0.1:8763/healthz | grep -qx ok
+
+      - name: Stop daemons
+        if: always()
+        run: |
+          kill "$(cat "$RUNNER_TEMP/wasmx-receipt.pid")" 2>/dev/null || true
+          kill "$(cat "$RUNNER_TEMP/ll-receipt.pid")" 2>/dev/null || true
+          wait "$(cat "$RUNNER_TEMP/wasmx-receipt.pid")" 2>/dev/null || true
+          wait "$(cat "$RUNNER_TEMP/ll-receipt.pid")" 2>/dev/null || true
+
+      - name: Dump logs on failure
+        if: failure()
+        run: |
+          cat "$RUNNER_TEMP/wasmx-receipt.log" 2>/dev/null || true
+          cat "$RUNNER_TEMP/ll-receipt.log" 2>/dev/null || true
