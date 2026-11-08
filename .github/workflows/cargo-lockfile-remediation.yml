@@ -8,6 +8,10 @@ on:
       - 'Cargo.lock'
   workflow_dispatch:
 
+concurrency:
+  group: cargo-lock-remediation-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
@@ -53,7 +57,7 @@ jobs:
         run: |
           set -euo pipefail
           echo 'BEGIN_CARGO_LOCKFILE_BASE64_20261108'
-          base64 -w0 Cargo.lock
+          base64 -w76 Cargo.lock
           printf '\nEND_CARGO_LOCKFILE_BASE64_20261108\n'
       - name: Preserve Cargo's actual generated lockfile
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
