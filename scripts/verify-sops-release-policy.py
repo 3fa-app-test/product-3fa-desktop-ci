@@ -35,9 +35,9 @@ def valid_age_recipient(value: str) -> bool:
     if any(ch not in BECH32_CHARS for ch in payload):
         return False
     # The age X25519 public key is 32 bytes, encoded in 52 five-bit groups;
-    # the final two padding bits must be zero, followed by six checksum groups.
+    # the final four padding bits must be zero, followed by six checksum groups.
     data = [BECH32_CHARS.index(ch) for ch in payload]
-    if (data[51] & 0b11) != 0:
+    if (data[51] & 0b1111) != 0:
         return False
     checksum = 1
     for item in [3, 3, 3, 0, 1, 7, 5] + data:  # bech32 HRP expansion of 'age'
