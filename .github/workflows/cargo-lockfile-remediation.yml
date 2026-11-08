@@ -1,0 +1,61 @@
+# Temporary non-publishing dependency-resolution evidence.
+# Remove this workflow once the generated Cargo.lock artifact has been reviewed.
+name: Cargo lockfile remediation proof
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/cargo-lockfile-remediation.yml'
+      - 'Cargo.lock'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  resolve:
+    name: resolve-patch-security-updates
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout exact PR source, without credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Verify exact input head
+        env:
+          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
+          test -z "$(git status --porcelain)"
+          cargo --version
+      - name: Resolve patched crates with Cargo (never hand-edit checksums)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo update \
+            -p rustls \
+            -p rustls-webpki \
+            -p quinn-proto \
+            -p ctutils \
+            -p pulldown-cmark \
+            -p webpki-roots \
+            -p tokio \
+            -p chacha20
+          test -s Cargo.lock
+          git diff --check
+          git diff --stat -- Cargo.lock
+      - name: Preserve Cargo's actual generated lockfile
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: generated-cargo-lockfile
+          path: Cargo.lock
+          if-no-files-found: error
+          retention-days: 3
+      - name: Validate headless build from resolved lockfile
+        run: cargo check --locked --no-default-features
+      - name: Validate headless tests from resolved lockfile
+        run: cargo test --locked --no-default-features
