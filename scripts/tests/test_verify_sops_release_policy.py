@@ -125,6 +125,50 @@ class PolicyTests(unittest.TestCase):
     def test_duplicate_age_key_rejected(self):
         self.assertIn('duplicate', self.check(policy(prod=(PROD1, PROD1, PROD2))))
 
+    def check_custom_payload_is_rejected(self, payload_text, expected):
+        with tempfile.TemporaryDirectory() as root:
+            base = Path(root)
+            (base / '.sops.yaml').write_text(policy(), encoding='utf-8')
+            (base / 'env/enc').mkdir(parents=True)
+            (base / 'env/enc/prod.env.enc').write_text(payload_text, encoding='utf-8')
+            p = subprocess.run([sys.executable, str(SCRIPT), str(base / '.sops.yaml'), 'prod'],
+                               capture_output=True, text=True, check=False)
+            self.assertNotEqual(p.returncode, 0, 'invalid SOPS payload must fail closed')
+            self.assertIn(expected, p.stderr)
+
+    def test_missing_production_mac_rejected(self):
+        payload = ''.join(
+            f'sops_age__list_{i}__map_enc=-----BEGIN AGE ENCRYPTED FILE-----\n'
+            f'sops_age__list_{i}__map_recipient={recipient}\n'
+            for i, recipient in enumerate((PROD1, PROD2)))
+        self.check_custom_payload_is_rejected(payload, 'SOPS MAC or per-recipient')
+
+    def test_missing_production_envelope_rejected(self):
+        payload = ''.join(
+            f'sops_age__list_{i}__map_recipient={recipient}\n'
+            for i, recipient in enumerate((PROD1, PROD2)))
+        self.check_custom_payload_is_rejected(
+            payload + 'sops_mac=ENC[AES256_GCM,data:fixture]\n',
+            'SOPS MAC or per-recipient')
+
+    def test_duplicate_production_envelope_rejected(self):
+        payload = ('sops_age__list_0__map_enc=-----BEGIN AGE ENCRYPTED FILE-----\n' * 2 +
+                   f'sops_age__list_0__map_recipient={PROD1}\n' +
+                   'sops_age__list_1__map_enc=-----BEGIN AGE ENCRYPTED FILE-----\n' +
+                   f'sops_age__list_1__map_recipient={PROD2}\n' +
+                   'sops_mac=ENC[AES256_GCM,data:fixture]\n')
+        self.check_custom_payload_is_rejected(payload, 'missing or invalid')
+
+    def test_unknown_sops_age_metadata_rejected(self):
+        payload = ''.join(
+            f'sops_age__list_{i}__map_enc=-----BEGIN AGE ENCRYPTED FILE-----\n'
+            f'sops_age__list_{i}__map_recipient={recipient}\n'
+            for i, recipient in enumerate((PROD1, PROD2)))
+        self.check_custom_payload_is_rejected(
+            payload + 'sops_age__list_2__map_surprise=ignored\n'
+                      'sops_mac=ENC[AES256_GCM,data:fixture]\n',
+            'unrecognized SOPS age metadata')
+
     def test_non_contiguous_payload_indices_rejected(self):
         with tempfile.TemporaryDirectory() as root:
             base = Path(root)
