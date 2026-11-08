@@ -1,0 +1,48 @@
+# Temporary non-publishing lockfile repair. Delete before merging.
+name: Yanked Cargo dependency repair artifact
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/cargo-yanked-repair.yml'
+      - 'Cargo.lock'
+permissions:
+  contents: read
+concurrency:
+  group: cargo-yanked-repair-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+jobs:
+  resolve:
+    name: resolve-yanked-compatible-replacements
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout pinned exact source without persisted credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Verify source identity and resolve yanked crates
+        env:
+          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
+          cargo update -p async-executor -p clipboard-win
+          test -s Cargo.lock
+          git diff --check
+          git diff --stat -- Cargo.lock
+      - name: Export exact Cargo-resolved lockfile as public text
+        run: |
+          set -euo pipefail
+          echo BEGIN_YANKED_LOCKFILE_B64_20261108
+          base64 -w76 Cargo.lock
+          echo END_YANKED_LOCKFILE_B64_20261108
+      - name: Upload generated lockfile evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: resolved-yanked-dependencies
+          path: Cargo.lock
+          if-no-files-found: error
+          retention-days: 3
