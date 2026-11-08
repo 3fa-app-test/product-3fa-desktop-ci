@@ -76,6 +76,18 @@ class PolicyTests(unittest.TestCase):
     def test_checksum_typo_rejected(self):
         self.assertIn('invalid age recipient', self.check(policy(prod=(PROD1[:-1] + 'p', PROD2))))
 
+    def test_noncanonical_padding_with_valid_checksum_rejected(self):
+        # Recalculate a legitimate checksum after changing one otherwise
+        # hidden padding bit: checksum validation alone is insufficient.
+        values = [ALPHABET.index(ch) for ch in PROD1[4:]]
+        data = values[:52]
+        self.assertEqual(data[51] & 0b1111, 0)
+        data[51] |= 0b0100
+        polymod = checksum([3, 3, 3, 0, 1, 7, 5] + data + [0] * 6) ^ 1
+        trailing = [(polymod >> (5 * (5 - i))) & 31 for i in range(6)]
+        malformed = 'age1' + ''.join(ALPHABET[v] for v in data + trailing)
+        self.assertIn('invalid age recipient', self.check(policy(prod=(malformed, PROD2))))
+
     def test_duplicate_prod_rule_rejected(self):
         extra = '\n  - path_regex: ^env/enc/prod\\.env\\.enc$\n    age:\n      - ' + PROD2 + '\n'
         self.assertIn('duplicate exact prod', self.check(policy() + extra))
