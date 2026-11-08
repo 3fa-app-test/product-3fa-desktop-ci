@@ -57,8 +57,10 @@ class PolicyTests(unittest.TestCase):
             (base / '.sops.yaml').write_text(text, encoding='utf-8')
             (base / 'env/enc').mkdir(parents=True)
             (base / 'env/enc/prod.env.enc').write_text(''.join(
+                f'sops_age__list_{i}__map_enc=-----BEGIN AGE ENCRYPTED FILE-----\n'
                 f'sops_age__list_{i}__map_recipient={value}\n'
-                for i, value in enumerate(payload)), encoding='utf-8')
+                for i, value in enumerate(payload)) +
+                'sops_mac=ENC[AES256_GCM,data:fixture]\n', encoding='utf-8')
             p = subprocess.run([sys.executable, str(SCRIPT), str(base / '.sops.yaml'), 'prod'],
                                capture_output=True, text=True, check=False)
             self.assertEqual(p.returncode == 0, success, p.stderr)
@@ -96,6 +98,27 @@ class PolicyTests(unittest.TestCase):
         extra = '\n  - path_regex: .*\n    age:\n      - ' + PROD2 + '\n'
         self.assertIn('unrecognized', self.check(policy() + extra))
 
+    def test_duplicate_root_rejected(self):
+        self.assertIn("duplicate creation_rules root",
+                      self.check(policy() + "\ncreation_rules:\n"))
+
+    def test_unsupported_yaml_merge_anchor_rejected(self):
+        self.assertIn("unsupported SOPS policy field",
+                      self.check(policy() + "\n  <<: *inject\n"))
+
+    def test_unsupported_key_group_rejected(self):
+        self.assertIn("unsupported SOPS policy field",
+                      self.check(policy().replace("    age:", "    key_groups:")))
+
+    def test_invalid_environment_rejected(self):
+        with tempfile.TemporaryDirectory() as root:
+            policy_path = Path(root) / '.sops.yaml'
+            policy_path.write_text(policy(), encoding='utf-8')
+            p = subprocess.run([sys.executable, str(SCRIPT), str(policy_path), 'production'],
+                               capture_output=True, text=True, check=False)
+            self.assertNotEqual(p.returncode, 0)
+            self.assertIn('unsupported environment', p.stderr)
+
     def test_unrekeyed_prod_payload_rejected(self):
         self.assertIn('sops updatekeys', self.check(policy(), payload=(DEV,)))
 
@@ -108,8 +131,11 @@ class PolicyTests(unittest.TestCase):
             (base / '.sops.yaml').write_text(policy(), encoding='utf-8')
             (base / 'env/enc').mkdir(parents=True)
             (base / 'env/enc/prod.env.enc').write_text(
+                'sops_age__list_0__map_enc=-----BEGIN AGE ENCRYPTED FILE-----\n'
                 f'sops_age__list_0__map_recipient={PROD1}\n'
-                f'sops_age__list_2__map_recipient={PROD2}\n', encoding='utf-8')
+                'sops_age__list_2__map_enc=-----BEGIN AGE ENCRYPTED FILE-----\n'
+                f'sops_age__list_2__map_recipient={PROD2}\n'
+                'sops_mac=ENC[AES256_GCM,data:fixture]\n', encoding='utf-8')
             p = subprocess.run([sys.executable, str(SCRIPT), str(base / '.sops.yaml'), 'prod'],
                                capture_output=True, text=True, check=False)
             self.assertNotEqual(p.returncode, 0)
