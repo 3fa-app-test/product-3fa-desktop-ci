@@ -50,41 +50,56 @@ def valid_age_recipient(value: str) -> bool:
 
 
 def parse_recipients(path: Path) -> dict[str, set[str]]:
+    """Accept only the narrowly supported, exact-path SOPS age policy grammar.
+
+    Arbitrary YAML anchors, merge keys, duplicate top-level keys, and other
+    creation-rule fields must be rejected rather than interpreted differently
+    from the real SOPS YAML parser.
+    """
     recipients: dict[str, set[str]] = {"dev": set(), "prod": set()}
     seen_rules: set[str] = set()
+    seen_age: set[str] = set()
     current: str | None = None
-    in_age = False
-    rule_indent = age_indent = -1
+    saw_root = False
 
     for raw_line in path.read_text(encoding="utf-8").splitlines():
         stripped = raw_line.strip()
         if not stripped or stripped.startswith("#"):
             continue
+        if "\t" in raw_line:
+            fail("tabs are unsupported in production SOPS creation rules")
         indent = len(raw_line) - len(raw_line.lstrip(" "))
-        rule_match = ENV_RULE.match(raw_line)
-        if rule_match:
-            value = rule_match.group("value").strip().strip("\"'")
-            current = EXACT_RULES.get(value)
-            if current is None:
-                fail("unrecognized path_regex creation rule; review its precedence")
-            if current in seen_rules:
-                fail(f"duplicate exact {current} creation rule")
-            seen_rules.add(current)
-            rule_indent = indent
-            in_age = False
+        if indent == 0 and stripped == "creation_rules:":
+            if saw_root:
+                fail("duplicate creation_rules root")
+            saw_root = True
             continue
-        if current is None:
-            continue
-        if stripped == "age:" and indent > rule_indent:
-            if in_age or recipients[current]:
-                fail(f"multiple age recipient blocks in {current} rule")
-            age_indent = indent
-            in_age = True
-            continue
-        if in_age and indent > age_indent:
-            match = LIST_ITEM.match(raw_line)
+        if not saw_root:
+            fail("creation_rules must be the first policy field")
+        if indent == 2:
+            match = ENV_RULE.fullmatch(raw_line)
             if not match:
-                fail(f"unsupported age entry in {current} rule")
+                fail("unrecognized SOPS creation rule")
+            value = match.group("value").strip().strip("\"'")
+            next_rule = EXACT_RULES.get(value)
+            if next_rule is None:
+                fail("unrecognized path_regex creation rule; review its precedence")
+            if next_rule in seen_rules:
+                fail(f"duplicate exact {next_rule} creation rule")
+            seen_rules.add(next_rule)
+            current = next_rule
+            continue
+        if indent == 4 and stripped == "age:":
+            if current is None or current in seen_age:
+                fail("misplaced or duplicate age recipient block")
+            seen_age.add(current)
+            continue
+        if indent == 6 and stripped.startswith("- "):
+            if current not in seen_age:
+                fail("age recipient appears without an age rule")
+            match = LIST_ITEM.fullmatch(raw_line)
+            if not match:
+                fail("unsupported age recipient entry")
             value = match.group("value").strip().strip("\"'")
             if not valid_age_recipient(value):
                 fail(f"invalid age recipient encoding in {current} rule")
@@ -92,30 +107,49 @@ def parse_recipients(path: Path) -> dict[str, set[str]]:
                 fail(f"duplicate age recipient in {current} rule")
             recipients[current].add(value)
             continue
-        if indent <= rule_indent and stripped.startswith("-"):
-            fail("unrecognized SOPS creation rule")
-        if stripped != "creation_rules:" and current is not None:
-            fail(f"unsupported field in {current} SOPS creation rule")
+        fail("unsupported SOPS policy field or YAML structure")
 
-    if seen_rules != {"dev", "prod"}:
-        fail("both exact dev and prod creation rules are required")
+    if not saw_root or seen_rules != {"dev", "prod"} or seen_age != {"dev", "prod"}:
+        fail("both exact dev and prod age creation rules are required")
     return recipients
 
 
 def encrypted_age_recipients(path: Path) -> set[str]:
+    if path.is_symlink():
+        fail("encrypted production payload must not be a symlink")
     if not path.is_file():
         fail(f"missing encrypted production payload: {path}")
     recipients: set[str] = set()
     indices: set[int] = set()
+    envelope_indices: set[int] = set()
+    saw_mac = False
     for line in path.read_text(encoding="utf-8").splitlines():
         match = SOPS_AGE_RECIPIENT.fullmatch(line)
-        if not match:
+        if match:
+            index, recipient = int(match.group(1)), match.group(2)
+            if index in indices or recipient in recipients or not valid_age_recipient(recipient):
+                fail("duplicate or invalid encrypted production recipient metadata")
+            indices.add(index)
+            recipients.add(recipient)
             continue
-        index, recipient = int(match.group(1)), match.group(2)
-        if index in indices or recipient in recipients or not valid_age_recipient(recipient):
-            fail("duplicate or invalid encrypted production recipient metadata")
-        indices.add(index)
-        recipients.add(recipient)
+        envelope = re.fullmatch(r"sops_age__list_(\d+)__map_enc=(.+)", line)
+        if envelope:
+            index = int(envelope.group(1))
+            if index in envelope_indices or not envelope.group(2).startswith(
+                "-----BEGIN AGE ENCRYPTED FILE-----"
+            ):
+                fail("missing or invalid production age encrypted envelope")
+            envelope_indices.add(index)
+            continue
+        if line.startswith("sops_mac="):
+            if saw_mac or not line.startswith("sops_mac=ENC["):
+                fail("invalid or duplicate SOPS MAC metadata")
+            saw_mac = True
+            continue
+        if line.startswith("sops_age__list_"):
+            fail("unrecognized SOPS age metadata")
+    if not saw_mac or indices != envelope_indices:
+        fail("production SOPS MAC or per-recipient encrypted envelope is missing")
     if indices != set(range(len(indices))):
         fail("noncontiguous encrypted production age recipient indexes")
     return recipients
@@ -127,8 +161,12 @@ def main(argv: list[str]) -> int:
         return 2
     policy_path = Path(argv[1])
     environment = argv[2].strip().lower()
-    if environment != "prod":
+    if environment not in {"dev", "prod"}:
+        fail("unsupported environment: only dev or prod are permitted")
+    if environment == "dev":
         return 0
+    if policy_path.is_symlink():
+        fail("SOPS policy path must not be a symlink")
     if not policy_path.is_file():
         fail(f"missing policy file: {policy_path}")
     recipients = parse_recipients(policy_path)
