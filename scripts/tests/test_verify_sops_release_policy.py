@@ -103,7 +103,7 @@ class PolicyTests(unittest.TestCase):
                       self.check(policy() + "\ncreation_rules:\n"))
 
     def test_unsupported_yaml_merge_anchor_rejected(self):
-        self.assertIn("unsupported SOPS policy field",
+        self.assertIn("unrecognized SOPS creation rule",
                       self.check(policy() + "\n  <<: *inject\n"))
 
     def test_unsupported_key_group_rejected(self):
